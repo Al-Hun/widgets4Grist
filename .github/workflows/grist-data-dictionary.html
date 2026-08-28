@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dictionnaire de données Grist</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+  :root{
+    --ink:#1b2027;
+    --ink-soft:#5b6472;
+    --line:#dfe3e8;
+    --paper:#fbfbfa;
+    --panel:#ffffff;
+    --accent:#2f5d4f;      /* vert sombre, registre "registre / cadastre" */
+    --accent-soft:#e7efec;
+    --amber:#a5651c;       /* pour les liens / références */
+    --amber-soft:#f6ecdf;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    --sans: "IBM Plex Sans", "Inter", system-ui, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);font-family:var(--sans);}
+  body{padding:20px 24px 40px;}
+
+  header{
+    display:flex;align-items:baseline;justify-content:space-between;
+    border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:16px;flex-wrap:wrap;gap:8px;
+  }
+  header h1{font-size:15px;letter-spacing:.04em;text-transform:uppercase;margin:0;font-weight:700;}
+  header .doc-name{font-family:var(--mono);font-size:12px;color:var(--ink-soft);}
+
+  .tabs{display:flex;gap:2px;margin-bottom:14px;}
+  .tab{
+    font-family:var(--mono);font-size:12px;letter-spacing:.03em;
+    padding:7px 14px;cursor:pointer;background:var(--panel);
+    border:1px solid var(--line);border-bottom:none;color:var(--ink-soft);
+    border-radius:4px 4px 0 0;
+  }
+  .tab.active{color:var(--ink);background:var(--accent-soft);border-color:var(--accent);font-weight:600;}
+
+  .toolbar{
+    display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;
+  }
+  .toolbar input[type=text]{
+    font-family:var(--mono);font-size:12.5px;padding:6px 10px;border:1px solid var(--line);
+    border-radius:4px;min-width:220px;background:var(--panel);
+  }
+  .toolbar button{
+    font-family:var(--sans);font-size:12px;padding:6px 12px;border:1px solid var(--ink);
+    background:var(--ink);color:#fff;border-radius:4px;cursor:pointer;
+  }
+  .toolbar button:hover{opacity:.85;}
+  .count{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);margin-left:auto;}
+
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);}
+  thead th{
+    text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--ink-soft);border-bottom:1px solid var(--ink);padding:8px 10px;background:#f4f5f3;
+    position:sticky;top:0;
+  }
+  tbody td{padding:7px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top;}
+  tbody tr:hover{background:#f7f8f6;}
+  tbody tr.table-head td{
+    background:var(--ink);color:#fff;font-weight:700;font-family:var(--mono);font-size:12px;
+    letter-spacing:.03em;padding-top:9px;padding-bottom:9px;
+  }
+  .colid{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:600;}
+  .type{font-family:var(--mono);font-size:12px;color:var(--ink-soft);}
+  .formula-badge{
+    display:inline-block;font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:9px;
+    background:var(--accent-soft);color:var(--accent);margin-left:6px;
+  }
+  .formula-code{
+    display:block;font-family:var(--mono);font-size:11px;color:var(--ink-soft);
+    margin-top:3px;white-space:pre-wrap;word-break:break-word;
+  }
+  .desc{color:var(--ink-soft);font-size:12.5px;}
+
+  .ref-badge{
+    display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:9px;
+    background:var(--amber-soft);color:var(--amber);font-weight:600;
+  }
+  .arrow{color:var(--ink-soft);margin:0 6px;font-family:var(--mono);}
+  .target{font-family:var(--mono);font-weight:600;color:var(--ink);}
+
+  #status{
+    font-family:var(--mono);font-size:12.5px;color:var(--ink-soft);padding:30px 4px;
+  }
+  #status.error{color:#a5341c;}
+  .hint{font-size:11.5px;color:var(--ink-soft);margin-top:4px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dictionnaire &amp; liens — base Grist</h1>
+  <span class="doc-name" id="docName">…</span>
+</header>
+
+<div id="status">Connexion au document Grist…</div>
+
+<div id="app" style="display:none;">
+  <div class="tabs">
+    <div class="tab active" data-tab="dict">Dictionnaire des données</div>
+    <div class="tab" data-tab="links">Liens entre tables</div>
+  </div>
+
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="Filtrer (table, colonne, type…)" />
+    <button id="exportBtn">Exporter CSV</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="pane-dict"></div>
+  <div id="pane-links" style="display:none;"></div>
+</div>
+
+<script>
+const REF_RE = /^Ref(List)?:(.+)$/;
+
+let TABLES = [];        // {tableRef, tableId}
+let COLUMNS = [];        // enriched columns
+let currentTab = 'dict';
+
+function grain(type){
+  const m = REF_RE.exec(type || '');
+  if(!m) return null;
+  return { isList: !!m[1], target: m[2] };
+}
+
+async function boot(){
+  try{
+    grist.ready({ requiredAccess: 'full' });
+
+    grist.docApi.getDocName().then(n => {
+      document.getElementById('docName').textContent = n || '';
+    }).catch(()=>{});
+
+    const [tablesRaw, colsRaw] = await Promise.all([
+      grist.docApi.fetchTable('_grist_Tables'),
+      grist.docApi.fetchTable('_grist_Tables_column')
+    ]);
+
+    // fetchTable returns column-oriented data: {id:[...], tableId:[...], ...}
+    const tCount = tablesRaw.id.length;
+    for(let i=0;i<tCount;i++){
+      TABLES.push({ tableRef: tablesRaw.id[i], tableId: tablesRaw.tableId[i] });
+    }
+    const tableById = {};
+    TABLES.forEach(t => tableById[t.tableRef] = t.tableId);
+
+    const cCount = colsRaw.id.length;
+    for(let i=0;i<cCount;i++){
+      const parentRef = colsRaw.parentId[i];
+      const tableId = tableById[parentRef];
+      if(!tableId || tableId.startsWith('_grist_')) continue; // ignorer les tables système
+      const colId = colsRaw.colId[i];
+      if(colId === 'manualSort') continue;
+      const type = colsRaw.type[i] || '';
+      const isFormula = !!colsRaw.isFormula[i];
+      const formula = colsRaw.formula[i] || '';
+      const label = colsRaw.label ? colsRaw.label[i] : colId;
+      const description = colsRaw.description ? (colsRaw.description[i] || '') : '';
+      COLUMNS.push({ tableId, colId, type, isFormula, formula, label, description });
+    }
+
+    // trier : par table puis par colonne
+    COLUMNS.sort((a,b) => a.tableId.localeCompare(b.tableId) || a.colId.localeCompare(b.colId));
+
+    document.getElementById('status').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    render();
+
+  }catch(err){
+    const s = document.getElementById('status');
+    s.textContent = 'Erreur de connexion au document Grist : ' + (err && err.message ? err.message : err) +
+      '  (le widget doit être ajouté avec accès complet au document — vérifier les droits d\'accès dans les options du widget).';
+    s.classList.add('error');
+    console.error(err);
+  }
+}
+
+function matchesFilter(text, needle){
+  return text.toLowerCase().includes(needle);
+}
+
+function renderDict(filter){
+  const container = document.getElementById('pane-dict');
+  let html = '<table><thead><tr><th>Colonne</th><th>Type</th><th>Détail</th><th>Description</th></tr></thead><tbody>';
+  let shown = 0;
+  let lastTable = null;
+  let tableHasRows = {};
+
+  // pré-filtrage par table pour ne pas afficher d'en-têtes vides
+  const grouped = {};
+  COLUMNS.forEach(c => {
+    const hay = `${c.tableId} ${c.colId} ${c.label} ${c.type} ${c.description}`.toLowerCase();
+    if(filter && !matchesFilter(hay, filter)) return;
+    (grouped[c.tableId] = grouped[c.tableId] || []).push(c);
+    shown++;
+  });
+
+  Object.keys(grouped).sort().forEach(tableId => {
+    html += `<tr class="table-head"><td colspan="4">${tableId}</td></tr>`;
+    grouped[tableId].forEach(c => {
+      const ref = grain(c.type);
+      let typeCell = `<span class="type">${escapeHtml(c.type)}</span>`;
+      let detail = '';
+      if(ref){
+        detail += `<span class="ref-badge">${ref.isList ? 'RefList' : 'Ref'} → ${escapeHtml(ref.target)}</span>`;
+      }
+      if(c.isFormula){
+        detail += `<span class="formula-badge">formule</span>`;
+        if(c.formula){
+          detail += `<span class="formula-code">${escapeHtml(c.formula)}</span>`;
+        }
+      }
+      html += `<tr>
+        <td><span class="colid">${escapeHtml(c.colId)}</span>${c.label && c.label!==c.colId ? ' <span class="desc">('+escapeHtml(c.label)+')</span>' : ''}</td>
+        <td>${typeCell}</td>
+        <td>${detail}</td>
+        <td class="desc">${escapeHtml(c.description)}</td>
+      </tr>`;
+    });
+  });
+
+  html += '</tbody></table>';
+  if(shown === 0) html = '<div class="hint">Aucune colonne ne correspond au filtre.</div>';
+  container.innerHTML = html;
+  document.getElementById('count').textContent = shown + ' colonne(s)';
+}
+
+function renderLinks(filter){
+  const container = document.getElementById('pane-links');
+  const links = COLUMNS.map(c => ({ ...c, ref: grain(c.type) })).filter(c => c.ref);
+
+  let html = '<table><thead><tr><th>Table source</th><th>Colonne</th><th>Type de lien</th><th>Table cible</th><th>Formule</th></tr></thead><tbody>';
+  let shown = 0;
+  links.forEach(c => {
+    const hay = `${c.tableId} ${c.colId} ${c.ref.target}`.toLowerCase();
+    if(filter && !matchesFilter(hay, filter)) return;
+    shown++;
+    html += `<tr>
+      <td class="target">${escapeHtml(c.tableId)}</td>
+      <td><span class="colid">${escapeHtml(c.colId)}</span></td>
+      <td><span class="ref-badge">${c.ref.isList ? 'RefList (plusieurs)' : 'Ref (unique)'}</span></td>
+      <td class="target">${escapeHtml(c.ref.target)}<span class="arrow">←</span></td>
+      <td>${c.isFormula ? '<span class="formula-code">'+escapeHtml(c.formula)+'</span>' : ''}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  if(shown === 0) html = '<div class="hint">Aucun lien (colonne Ref / RefList) ne correspond au filtre.</div>';
+  container.innerHTML = html;
+  document.getElementById('count').textContent = shown + ' lien(s)';
+}
+
+function escapeHtml(s){
+  return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+function render(){
+  const filter = document.getElementById('search').value.trim().toLowerCase();
+  if(currentTab === 'dict') renderDict(filter);
+  else renderLinks(filter);
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentTab = tab.dataset.tab;
+    document.getElementById('pane-dict').style.display = currentTab === 'dict' ? 'block' : 'none';
+    document.getElementById('pane-links').style.display = currentTab === 'links' ? 'block' : 'none';
+    render();
+  });
+});
+
+document.getElementById('search').addEventListener('input', render);
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  let rows, header;
+  if(currentTab === 'dict'){
+    header = ['Table','Colonne','Label','Type','Lien vers','Formule','Description'];
+    rows = COLUMNS.map(c => {
+      const ref = grain(c.type);
+      return [c.tableId, c.colId, c.label, c.type, ref ? ref.target : '', c.isFormula ? c.formula : '', c.description];
+    });
+  } else {
+    header = ['Table source','Colonne','Type de lien','Table cible','Formule'];
+    rows = COLUMNS.filter(c => grain(c.type)).map(c => {
+      const ref = grain(c.type);
+      return [c.tableId, c.colId, ref.isList ? 'RefList' : 'Ref', ref.target, c.isFormula ? c.formula : ''];
+    });
+  }
+  const csv = [header, ...rows].map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (currentTab === 'dict' ? 'dictionnaire_donnees' : 'liens_tables') + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+boot();
+</script>
+</body>
+</html>
