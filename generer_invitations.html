@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Générer les invitations</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; color: #222; }
+  label { display: block; margin-bottom: 10px; font-size: 13px; color: #444; }
+  select { display: block; margin-top: 4px; padding: 6px; font-size: 14px; width: 100%; box-sizing: border-box; }
+  #filtres { border-top: 1px solid #ddd; margin-top: 6px; padding-top: 10px; }
+  #compte { color: #555; margin: 8px 0; font-size: 13px; }
+  button { background: #16983f; color: white; border: none; border-radius: 4px;
+           padding: 9px 14px; font-size: 14px; cursor: pointer; margin-right: 8px; margin-bottom: 4px; }
+  button.secondaire { background: #eee; color: #333; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  #statut { margin-top: 10px; font-size: 13px; color: #333; }
+</style>
+</head>
+<body>
+  <label>Événement
+    <select id="evenement"><option value="">— choisir —</option></select>
+  </label>
+
+  <div id="filtres"></div>
+
+  <button id="btnApercu" class="secondaire">Aperçu</button>
+  <button id="btnRafraichir" class="secondaire">Rafraîchir les données</button>
+  <p id="compte"></p>
+  <button id="btnGenerer" disabled>Générer les invitations</button>
+  <p id="statut"></p>
+
+<script>
+// Pour ajouter un nouveau critère de filtre, ajoute une entrée ici.
+// type 'text' : le champ contient déjà le texte à afficher (colonnes formule Nature, Activite, CPV...)
+// type 'ref'  : le champ est une Référence (id numérique) ; on affiche le libellé d'une table liée
+// type 'bool' : le champ est un booléen (Oui / Non)
+const FILTRES = [
+  { id: 'nature',    label: 'Nature',           champ: 'Nature',                       type: 'text' },
+  { id: 'activite',  label: 'Activité',          champ: 'Activite',                     type: 'text' },
+  { id: 'tranche',   label: 'Tranche effectif',  champ: 'RefOrganisme_Tranche_effectif', type: 'ref',
+    table: 'P_Tranches_effectifs', labelChamp: 'Tranche_effectif' },
+  { id: 'cpv',       label: 'CPV',               champ: 'RefOrganisme_CPV',              type: 'text' },
+  { id: 'principal', label: 'Principal',         champ: 'Principal',                    type: 'bool' },
+  { id: 'fonction',  label: 'Fonction',          champ: 'FONCTION',                     type: 'ref',
+    table: 'P_FonctionsContacts', labelChamp: 'Fonctions_dans_Contacts' },
+];
+
+let contactsCache = null;
+let eventsCache = null;
+let labelMaps = {}; // { nomTable: { id: libellé } }
+
+grist.ready({ requiredAccess: 'full' });
+
+async function chargerLabelMap(nomTable, champLabel) {
+  const t = await grist.docApi.fetchTable(nomTable);
+  const map = {};
+  for (let i = 0; i < t.id.length; i++) map[t.id[i]] = t[champLabel][i];
+  return map;
+}
+
+function optionsDistinctesTexte(valeurs) {
+  return [...new Set(valeurs.filter(v => v !== null && v !== undefined && v !== ''))].sort();
+}
+
+function optionsDistinctesRef(valeurs, map) {
+  const ids = [...new Set(valeurs.filter(v => v))];
+  return ids
+    .map(id => ({ id, label: map[id] || `#${id}` }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function construireFiltresUI() {
+  const conteneur = document.getElementById('filtres');
+  conteneur.innerHTML = '';
+  FILTRES.forEach(f => {
+    const label = document.createElement('label');
+    label.textContent = f.label;
+    const select = document.createElement('select');
+    select.id = `filtre_${f.id}`;
+
+    if (f.type === 'bool') {
+      select.innerHTML = `
+        <option value="">Toutes</option>
+        <option value="oui">Oui</option>
+        <option value="non">Non</option>`;
+    } else {
+      const optToutes = document.createElement('option');
+      optToutes.value = '';
+      optToutes.textContent = 'Toutes / Tous';
+      select.appendChild(optToutes);
+
+      if (f.type === 'text') {
+        optionsDistinctesTexte(contactsCache[f.champ]).forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v; opt.textContent = v;
+          select.appendChild(opt);
+        });
+      } else if (f.type === 'ref') {
+        optionsDistinctesRef(contactsCache[f.champ], labelMaps[f.table]).forEach(({ id, label: lbl }) => {
+          const opt = document.createElement('option');
+          opt.value = id; opt.textContent = lbl;
+          select.appendChild(opt);
+        });
+      }
+    }
+
+    select.addEventListener('change', () => {
+      document.getElementById('btnGenerer').disabled = true;
+      document.getElementById('compte').textContent = '';
+    });
+
+    label.appendChild(select);
+    conteneur.appendChild(label);
+  });
+}
+
+async function chargerDonnees() {
+  eventsCache = await grist.docApi.fetchTable('Evenements');
+  const evSel = document.getElementById('evenement');
+  const evPrecedent = evSel.value;
+  evSel.innerHTML = '<option value="">— choisir —</option>';
+  for (let i = 0; i < eventsCache.id.length; i++) {
+    const opt = document.createElement('option');
+    opt.value = eventsCache.id[i];
+    opt.textContent = eventsCache.Nom[i];
+    evSel.appendChild(opt);
+  }
+  evSel.value = evPrecedent;
+
+  contactsCache = await grist.docApi.fetchTable('Contacts');
+
+  labelMaps = {};
+  for (const f of FILTRES) {
+    if (f.type === 'ref' && !labelMaps[f.table]) {
+      labelMaps[f.table] = await chargerLabelMap(f.table, f.labelChamp);
+    }
+  }
+
+  construireFiltresUI();
+
+  document.getElementById('compte').textContent = '';
+  document.getElementById('statut').textContent = '';
+  document.getElementById('btnGenerer').disabled = true;
+}
+chargerDonnees();
+
+document.getElementById('btnRafraichir').addEventListener('click', chargerDonnees);
+document.getElementById('evenement').addEventListener('change', () => {
+  document.getElementById('btnGenerer').disabled = true;
+  document.getElementById('compte').textContent = '';
+});
+
+function contactCorrespond(i) {
+  return FILTRES.every(f => {
+    const select = document.getElementById(`filtre_${f.id}`);
+    const val = select.value;
+    if (val === '') return true; // pas de contrainte sur ce critère
+    const valeurContact = contactsCache[f.champ][i];
+    if (f.type === 'bool') {
+      return valeurContact === (val === 'oui');
+    }
+    if (f.type === 'ref') {
+      return valeurContact === Number(val);
+    }
+    return valeurContact === val; // text
+  });
+}
+
+function contactsFiltres() {
+  const ids = [];
+  for (let i = 0; i < contactsCache.id.length; i++) {
+    if (contactCorrespond(i)) ids.push(contactsCache.id[i]);
+  }
+  return ids;
+}
+
+document.getElementById('btnApercu').addEventListener('click', () => {
+  const n = contactsFiltres().length;
+  document.getElementById('compte').textContent = `${n} contact(s) correspondant au filtre`;
+  document.getElementById('btnGenerer').disabled = !(document.getElementById('evenement').value && n > 0);
+});
+
+document.getElementById('btnGenerer').addEventListener('click', async () => {
+  const eventId = Number(document.getElementById('evenement').value);
+  if (!eventId) return;
+  const statut = document.getElementById('statut');
+  statut.textContent = 'Génération en cours...';
+
+  // Recharge Invitations à chaque génération pour éviter les doublons
+  const existing = await grist.docApi.fetchTable('Invitations');
+  const dejaInvites = new Set();
+  for (let i = 0; i < existing.id.length; i++) {
+    dejaInvites.add(`${existing.UUID_evenement[i]}_${existing.UUID_contact[i]}`);
+  }
+
+  const filtres = contactsFiltres();
+  const aCreer = filtres.filter(cId => !dejaInvites.has(`${eventId}_${cId}`));
+  const ignores = filtres.length - aCreer.length;
+
+  if (aCreer.length === 0) {
+    statut.textContent = ignores > 0
+      ? `Rien à faire : ${ignores} contact(s) déjà invité(s) à cet événement.`
+      : 'Aucun contact ne correspond au filtre.';
+    return;
+  }
+
+  const actions = aCreer.map((contactId) => ([
+    'AddRecord', 'Invitations', null,
+    { UUID_evenement: eventId, UUID_contact: contactId }
+  ]));
+  await grist.docApi.applyUserActions(actions);
+
+  statut.textContent = `${aCreer.length} invitation(s) créée(s).`
+    + (ignores > 0 ? ` (${ignores} déjà existante(s), ignorée(s))` : '');
+});
+</script>
+</body>
+</html>
